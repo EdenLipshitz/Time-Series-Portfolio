@@ -4,23 +4,117 @@ format: pdf
 editor: visual
 ---
 
-## Quarto
-
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
-
-## Running Code
-
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+## Handing Time Series in R 
 
 ```{r}
-1 + 1
+sales <- read.csv("sales_data.csv")
+
+# Run once — install anything missing
+pkgs <- c("tidyverse", "tsibble", "feasts", "fable", "timetk",
+          "modeltime", "kableExtra", "here")
 ```
 
-You can add options to executable code like this
+## Handing Dates and Aggregation
 
 ```{r}
-#| echo: false
-2 * 2
+# Load and filter data
+df <- read.csv("sales_data.csv")
+df$date <- as.Date(df$date)
+df <- subset(df, store_id == "S001")
+
+# Aggregate by Month using format()
+agg_month <- aggregate(sales ~ format(date, "%Y-%m"), data = df, FUN = sum)
+
+# Aggregate by Week (%U for week of the year)
+agg_week <- aggregate(sales ~ format(date, "%Y-%U"), data = df, FUN = mean)
+
+head(agg_month)
+
+sales_ts <- ts(agg_month$sales, start = c(2021, 1), frequency = 12)
+
+frequency(sales_ts)
+start(sales_ts)
+end(sales_ts)
+cycle(sales_ts)
+time(sales_ts)
+window(sales_ts, start = c(2022, 1), end = c(2022, 12))
+stats::lag(sales_ts, k = 1)
+diff(sales_ts)
+diff(sales_ts, lag = 12)
+is.ts(sales_ts)
+is.na(sales_ts)
+na.omit(sales_ts)
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+##  Helper conversions 
+
+```{r}
+t <- time(sales_ts)
+
+# Extract Year and Month
+years <- floor(t)
+months <- round(12 * (t - years)) + 1
+
+data.frame(Decimal = as.numeric(t), Year = years, Month = months)
+```
+
+## Subsetting with window
+
+```{r}
+# Extract only the second half of 2023
+sub_ts <- window(sales_ts, start = c(2023, 7), end = c(2023, 12))
+print(sub_ts)
+```
+
+## Lags and differences 
+
+```{r}
+# Shift the time index forward by 1 period (does not move the values)
+lagged_ts <- stats::lag(sales_ts, k = -1)
+
+# First-order differencing (removes linear trend)
+diff_ts <- diff(sales_ts, differences = 1)
+
+# Seasonal differencing (removes a 12-month seasonal pattern)
+seasonal_diff_ts <- diff(sales_ts, lag = 12)
+
+diff_ts
+```
+
+## Combining Series: `ts.union()` and `ts.intersect()`
+
+```{r}
+ts_a <- ts(1:10, start = c(2023, 1), frequency = 12)
+ts_b <- ts(11:18, start = c(2023, 4), frequency = 12)
+
+# Union: keeps full range, fills gaps with NA
+combined_union <- ts.union(ts_a, ts_b)
+
+# Intersect: keeps only the overlapping months
+combined_intersect <- ts.intersect(ts_a, ts_b)
+
+combined_intersect
+```
+
+## Checking for missing values 
+
+```{r}
+has_na <- anyNA(sales_ts)
+cat("Contains missing values:", has_na, "\n")
+```
+
+## Time series plots 
+
+```{r}
+plot.ts(sales_ts,
+        main = "Monthly Observations (2023)",
+        xlab = "Year/Month",
+        ylab = "Measurement Units",
+        col = "darkred",
+        lwd = 2,
+        lty = 1,
+        type = "o",
+        pch = 16)
+
+
+```
