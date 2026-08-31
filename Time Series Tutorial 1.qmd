@@ -4,7 +4,7 @@ format: pdf
 editor: visual
 ---
 
-## Handing Time Series in R 
+## Handing Time Series in R
 
 ```{r}
 sales <- read.csv("sales_data.csv")
@@ -46,7 +46,7 @@ is.na(sales_ts)
 na.omit(sales_ts)
 ```
 
-##  Helper conversions 
+## Helper conversions
 
 ```{r}
 t <- time(sales_ts)
@@ -66,7 +66,7 @@ sub_ts <- window(sales_ts, start = c(2023, 7), end = c(2023, 12))
 print(sub_ts)
 ```
 
-## Lags and differences 
+## Lags and differences
 
 ```{r}
 # Shift the time index forward by 1 period (does not move the values)
@@ -96,18 +96,18 @@ combined_intersect <- ts.intersect(ts_a, ts_b)
 combined_intersect
 ```
 
-## Checking for missing values 
+## Checking for missing values
 
 ```{r}
 has_na <- anyNA(sales_ts)
 cat("Contains missing values:", has_na, "\n")
 ```
 
-## Time series plots 
+## Time series plots
 
 ```{r}
 plot.ts(sales_ts,
-        main = "Monthly Observations (2023)",
+        main = "Monthly Observations 2021-2024 for Store 1",
         xlab = "Year/Month",
         ylab = "Measurement Units",
         col = "darkred",
@@ -116,5 +116,198 @@ plot.ts(sales_ts,
         type = "o",
         pch = 16)
 
+plot(sales_ts,
+     main = "Simplified Time Plot",
+     col = "blue",
+     lty = 2)
 
+# naive decomposition 
+decomp <- decompose(sales_ts)
+plot(decomp)
 ```
+
+## **Modern Time Series Analysis: tidyverts, timetk, and modeltime**
+
+```{r}
+# Core packages used in this section
+library(tidyverse)   # dplyr, ggplot2, readr, lubridate
+library(tsibble)      # tidy time series class: index + key
+library(feasts)        # Feature extraction And Statistics for Time Series
+library(timetk)        # tidy plotting & diagnostics for ts/tibbles
+#library(modeltime)      # unified tidymodels-style forecasting framework
+```
+
+## **Reading Data into a `tsibble`**
+
+```{r}
+library(readr)
+library(tsibble)
+library(dplyr)
+
+# 1. Read raw data, forcing an explicit Date type on `date`
+raw <- read_csv(
+  "sales_data.csv",
+  col_types = cols(
+    date     = col_date(format = "%Y-%m-%d"),
+    store_id = col_character(),
+    sales    = col_double()
+  )
+)
+
+# 2. Build the tsibble at its NATIVE granularity (daily) — one row per
+#    (date, store_id) combination, so index and key are already unique
+sales_tsbl <- raw %>%
+  as_tsibble(index = date, key = store_id)
+
+# 3. Check for implicit gaps in the time index (missing rows, not NA values)
+has_gaps <- sales_tsbl %>% count_gaps()
+print(has_gaps)
+
+# 4. If gaps exist, fill them explicitly so operations don't silently misalign
+sales_tsbl <- sales_tsbl %>% fill_gaps(.full = TRUE)
+
+# 5. Only NOW aggregate to a coarser granularity, via index_by() + summarise()
+sales_monthly <- sales_tsbl %>%
+  index_by(month = ~ yearmonth(.)) %>%
+  summarise(sales = sum(sales, na.rm = TRUE), .groups = "drop")
+```
+
+## EDA with `feasts`
+
+```{r}
+library(feasts)
+library(ggplot2)
+library(tidyr)
+
+# Fill remaining NAs (per-store mean) before decomposition
+sales_tsbl_filled <- sales_tsbl %>%
+  group_by_key() %>%
+  mutate(sales = tidyr::replace_na(sales, mean(sales, na.rm = TRUE))) %>%
+  ungroup()
+
+# Overall shape of the series (faceted automatically because of the key)
+sales_tsbl_filled %>% autoplot(sales)
+```
+
+```{r}
+# Compare seasonal cycles year over year (daily data has 2 plausible cycles —
+# weekly and yearly — so `period` must be stated explicitly)
+sales_tsbl_filled %>% gg_season(sales, period = "year", labels = "both")
+
+sales_tsbl_filled %>% gg_season(sales, period = "week")
+
+# Compare each calendar month's behaviour across years (the monthly aggregate
+# is cleaner here than daily, since it removes the weekly cycle from view)
+sales_monthly %>% gg_subseries(sales)
+
+# Autocorrelation structure
+sales_tsbl_filled %>% ACF(sales) %>% autoplot()
+
+# STL decomposition (needs an explicit period on daily data too)
+sales_tsbl_filled %>%
+  model(STL(sales ~ trend() + season(period = "year"))) %>%
+  components() %>%
+  autoplot()
+
+
+sales_tsbl_filled %>%
+  features(sales, feat_stl)
+```
+
+## **Reading and Diagnosing Data with `timetk`**
+
+```{r}
+library(timetk)
+library(readr)
+
+# Read data — timetk works with a normal tibble; only a Date column is required
+sales_tbl <- read_csv(
+  "sales_data.csv",
+  col_types = cols(
+    date     = col_date(format = "%Y-%m-%d"),
+    store_id = col_character(),
+    sales    = col_double()
+  )
+)
+
+# Interactive/static time series plot, grouped by store (no tsibble conversion needed)
+sales_tbl %>%
+  group_by(store_id) %>%
+  plot_time_series(date, sales, .interactive = FALSE)
+
+# Diagnose the time index: regularity, gaps, scale, timezone
+sales_tbl %>% tk_summary_diagnostics(date)
+
+# Seasonal decomposition / ACF diagnostics in one call
+# Explicit .feature_set: daily data has no sub-day granularity, so
+# "second"/"minute"/"hour" are meaningless here and are excluded.
+sales_tbl %>%
+  plot_seasonal_diagnostics(
+    date, sales,
+    .feature_set = c("wday.lbl", "week", "month.lbl", "quarter", "year"),
+    .interactive = FALSE
+  )
+
+sales_tbl %>%
+  plot_acf_diagnostics(date, sales, .interactive = FALSE)
+```
+
+## Plotting using all the different functions 
+
+```{r}
+library(timetk)
+
+# Load and filter data
+df <- read.csv("sales_data.csv")
+df$date <- as.Date(df$date)
+s1 <- subset(df, store_id == "S001")
+
+# plot_time_series
+s1 %>%
+  plot_time_series(date, sales)
+
+# tk_summary_diagnostics
+s1 %>%
+  tk_summary_diagnostics(date)
+
+# plot_seasonal_diagnostics
+s1 %>%
+  plot_seasonal_diagnostics(date, sales)
+
+# plot_acf_diagnostics
+s1 %>%
+  plot_acf_diagnostics(date, sales)
+
+# plot_anomaly_diagnostics
+s1 %>%
+  plot_anomaly_diagnostics(date, sales)
+```
+
+## Question 7 - Answering code questions 
+
+**Q1 — `ts(x, start = c(2023, 13), frequency = 12)`**\
+This is invalid because monthly data only has 12 periods per year, so the second element of `start` can't exceed 12. Writing `c(2023, 13)` tries to say "period 13 of 2023," which doesn't exist — it should roll over to `c(2024, 1)` instead. Fix: `ts(x, start = c(2024, 1), frequency = 12)`.
+
+**Q2 — `ts(x, start = 2023, frequency = 12)`**\
+For sub-annual data (anything with `frequency > 1`), `start` needs to specify both the year *and* which period within that year you're starting at — a single number is ambiguous. Fix: `ts(x, start = c(2023, 1), frequency = 12)`.
+
+**Q3 — `ts(x, start = c(2023, 0), frequency = 12)`**\
+`ts()` uses 1-based indexing for periods, so period `0` doesn't exist within a year — the first month is period 1, not 0. Fix: `ts(x, start = c(2023, 1), frequency = 12)`.
+
+**Q4 — `ts(x, start = c(2023, 2), frequency = 4)`**\
+The meaning of "period 2" depends entirely on what `frequency` you've set — with `frequency = 4` (quarterly), period 2 means Q2, not February. If the data is actually monthly, the frequency is wrong and needs to match the data's real periodicity. Fix: `ts(x, start = c(2023, 2), frequency = 12)`.
+
+**Q5 — `ts(x, start = c(2023, 1), frequency = 12.5)`**\
+`frequency` must be a whole number, since it represents a count of periods per cycle (you can't have half an observation per year). Many time-series methods that build on `ts` objects require an integer frequency to work at all. Fix: `ts(x, start = c(2023, 1), frequency = 12)`.
+
+**Q6 — `ts(x, start = c(2023, 1), frequency = 12, deltat = 1/12)`**\
+`frequency` and `deltat` both describe the same thing (the spacing between observations) from two different angles — one as "how many per year," the other as "time between = 1/frequency" — so specifying both is redundant and R doesn't allow it. Fix: pick one; here, `ts(x, start = c(2023, 1), frequency = 12)`.
+
+**Q7 — `ts(x, start = c(2023, 1), frequency = 365)`**\
+`frequency = 365` tells R this is daily data, so if `x` is actually a vector of monthly values, the frequency doesn't match the actual data type/spacing — it would misassign what each value represents in the yearly cycle. Fix: `ts(x, start = c(2023, 1), frequency = 12)`.
+
+**Q8 — `window(x, start = c(2023, 13))`**\
+`window()` can only extract a period that actually exists within the original series' time range — asking it to start at "month 13 of 2023" (or any point outside the series' bounds) has nothing to return. Fix: pick a start point inside the series, e.g. `window(x, start = c(2024, 1))`.
+
+**Q9 — `decompose(ts(x, frequency = 1))`**\
+`decompose()` splits a series into trend, seasonal, and random components — but with `frequency = 1`, there's no cycle at all (each "cycle" is a single point), so there's no seasonal pattern for it to extract, and it also needs at least two full cycles of data to estimate anything reliably. Fix: use a frequency that reflects real seasonality, e.g. `decompose(ts(x, frequency = 12))` for monthly data.
