@@ -1,0 +1,273 @@
+---
+title: "Tourist Accommodation in South Africa: Trend, Seasonality and Forecasting Through the COVID-19 Shock"
+subtitle: "Portfolio Project 1 — Time Series Analysis (Section 1)"
+author: "[Your Name] — [Student Number]"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    number-sections: true
+execute:
+  warning: false
+  message: false
+bibliography: references.bib
+---
+
+```{r setup}
+#| include: false
+library(tidyverse)
+library(fpp3)     # tsibble, feasts, fable, tsibbledata
+library(readxl)
+library(knitr)
+```
+
+::: callout-note
+## Project summary card (per portfolio template §3.1)
+
+-   **Section and topic:** Section 1 — Time Series Analysis in R (tsibble, decomposition, ETS/ARIMA forecasting)
+-   **Type of project:** Real-world data analysis + model comparison
+-   **Question/aim:** How has South African tourist accommodation demand evolved since 2007, and how well can standard time series models forecast it across the COVID-19 disruption?
+-   **Data used:** Stats SA P6410 "Tourist Accommodation", monthly, Jan 2007–Jun 2026 (real-world, publicly available official statistics)
+-   **Methods used:** tsibble wrangling, STL decomposition, seasonal/ACF diagnostics, ETS and ARIMA forecasting via `fable`, benchmark comparison, residual diagnostics
+-   **Key findings:** *(fill in after running)*
+-   **What I'd do differently next time:** *(fill in in Reflection §6)*
+-   **Link to this detailed analysis:** this document
+:::
+
+# Executive Summary
+
+*(150–250 words. Write this last, once you have real results. State: the question, why the data is interesting — real trend + seasonality + a structural break from COVID — which models you compared, which one won on the holdout set, and the single most important takeaway a reader should walk away with.)*
+
+> Draft placeholder: This project examines monthly stay-unit nights sold in South African tourist accommodation (2007–2026) using Stats SA's P6410 series. The series shows strong annual seasonality, a gentle pre-2020 upward trend, and a near-total collapse during COVID-19 lockdowns followed by a slow, still-incomplete recovery. I compare ETS and ARIMA models against a seasonal naive benchmark on a held-out test period, evaluate forecast accuracy and residual behaviour, and discuss what the COVID shock implies for using historical data to forecast this kind of series.
+
+# Data
+
+## Source and data statement
+
+-   **Source:** Statistics South Africa, *P6410 – Tourist Accommodation*, monthly release, downloaded \[DATE\] from \[statssa.gov.za URL\].
+-   **Nature:** Aggregate, publicly published official statistics — no personal or identifiable information, so no POPIA/anonymisation concerns apply.
+-   **Coverage:** Jan 2007 – Jun 2026, i.e. `r 2026-2007+1` years of monthly observations.
+-   **Sub-series:** the raw file contains 75 rows, each a combination of:
+    -   **Measure**: stay units available, stay unit nights sold, occupancy rate, income per stay unit night sold, income from accommodation, income from restaurant/bar sales
+    -   **Accommodation type**: Total industry, Hotels, Caravan parks & camping sites, Guest houses & guest farms, Other
+    -   **Adjustment**: Actual figures vs Seasonally adjusted
+
+For this project I focus primarily on **stay unit nights sold** (a volume measure of demand) for the **Total industry** and the **Hotels** sub-category, using **actual (non-seasonally-adjusted) figures**, since I want to do my own seasonal analysis rather than use Stats SA's adjustment.
+
+## Wrangling: wide StatsSA export → tidy tsibble
+
+The raw file is in a wide format typical of StatsSA releases: one row per series, one column per month, with month columns named like `MO012007` (Jan 2007). The code below reshapes this into a long, tidy tsibble.
+
+```{r wrangle}
+# library(readxl)
+# raw <- read_excel("tourist_data.xlsx")
+# View(raw)
+
+# Identify the month columns (pattern MO + MM + YYYY)
+month_cols <- names(raw) |> str_subset("^MO\\d{6}$")
+
+tourism_long <- raw |>
+  dplyr::select(H03, H04, H16, H17, all_of(month_cols)) |>
+  pivot_longer(
+    cols = all_of(month_cols),
+    names_to = "month_col",
+    values_to = "value"
+  ) |>
+  mutate(
+    month_num = as.integer(str_sub(month_col, 3, 4)),
+    year_num  = as.integer(str_sub(month_col, 5, 8)),
+    Month     = yearmonth(make_date(year_num, month_num, 1))
+  ) |>
+  rename(series_code = H03, series_name = H04,
+         adjustment = H16, unit = H17) |>
+  dplyr::select(series_code, series_name, adjustment, unit, Month, value) |>
+  filter(!is.na(value))
+
+# Split series_name "Measure - Category" into two columns
+tourism_long <- tourism_long |>
+  separate(series_name, into = c("measure", "category"),
+           sep = " - ", extra = "merge")
+
+tourism_ts <- tourism_long |>
+  filter(adjustment == "Actual figures") |>
+  as_tsibble(index = Month, key = c(measure, category))
+
+tourism_ts
+```
+
+```{r focus-series}
+nights_sold <- tourism_ts |>
+  filter(measure == "Stay units nights sold",
+         category %in% c("Total industry", "Hotels"))
+
+nights_sold
+```
+
+::: callout-tip
+Keep this wrangling chunk generic enough to reuse for other measures (occupancy rate, income) in your smaller pieces of work for other sections — you don't need to re-derive `tourism_ts` from scratch each time.
+:::
+
+# Exploratory Data Analysis
+
+## Time plot
+
+```{r eda-timeplot}
+nights_sold |>
+  autoplot(value) +
+  labs(title = "Stay unit nights sold, South Africa",
+       subtitle = "Total industry vs Hotels, monthly, actual figures",
+       y = "Nights sold ('000)", x = NULL)
+```
+
+*Comment on: overall trend pre-2020, the COVID-19 collapse in Apr–Jun 2020 (national lockdown), the shape of the recovery, and whether the series has returned to its pre-pandemic level.*
+
+## Seasonality
+
+```{r eda-season}
+nights_sold |>
+  filter(category == "Total industry") |>
+  gg_season(value) +
+  labs(title = "Seasonal plot: Total industry nights sold", y = "Nights sold ('000)")
+
+nights_sold |>
+  filter(category == "Total industry") |>
+  gg_subseries(value) +
+  labs(title = "Seasonal subseries plot: Total industry nights sold", y = "Nights sold ('000)")
+```
+
+*Comment on: which months are peak/trough season (school holidays, festive season), whether seasonal amplitude has changed over time, and whether 2020–2021 subseries panels look like outliers relative to their own month's history.*
+
+## STL decomposition
+
+```{r eda-stl}
+dcmp <- nights_sold |>
+  filter(category == "Total industry") |>
+  model(STL(value ~ trend(window = 13) + season(window = "periodic"))) |>
+  components()
+
+dcmp |> autoplot() +
+  labs(title = "STL decomposition: Total industry nights sold")
+```
+
+*Comment on: how much of the variance is trend vs seasonal vs remainder, and how visible the COVID shock is in the remainder component (this tells you whether it's better modelled as an outlier/intervention rather than "just noise").*
+
+## Autocorrelation
+
+```{r eda-acf}
+nights_sold |>
+  filter(category == "Total industry") |>
+  ACF(value, lag_max = 36) |>
+  autoplot() +
+  labs(title = "ACF: Total industry nights sold")
+```
+
+*Comment on: evidence of both trend (slow decay) and seasonality (peaks at multiples of 12) per the "Trend and seasonality in ACF plots" guidance from Lecture 1.*
+
+## Relationship between Total industry and Hotels
+
+```{r eda-relationship}
+nights_sold |>
+  as_tibble() |>
+  dplyr::select(Month, category, value) |>
+  pivot_wider(names_from = category, values_from = value) |>
+  ggplot(aes(x = Hotels, y = `Total industry`)) +
+  geom_point() +
+  labs(title = "Hotels vs Total industry nights sold",
+       x = "Hotels ('000 nights)", y = "Total industry ('000 nights)")
+```
+
+*Report the correlation coefficient and comment on whether Hotels tracks the total industry closely or diverges (e.g. self-catering/Airbnb-style substitution).*
+
+# Modelling
+
+## Train/test split
+
+```{r model-split}
+train <- nights_sold |>
+  filter(category == "Total industry", Month < yearmonth("2024 Jan"))
+
+test <- nights_sold |>
+  filter(category == "Total industry", Month >= yearmonth("2024 Jan"))
+```
+
+::: callout-important
+Decide and justify your split here: do you exclude the 2020–2021 COVID period from training (arguing it's a structural break unlikely to recur), or keep it in (arguing the model should learn to be robust to shocks)? Either is defensible — document your choice and reasoning, since the rubric rewards *justified* methodological decisions, not just a technically-working split.
+:::
+
+## Candidate models
+
+```{r model-fit}
+fit <- train |>
+  model(
+    SNAIVE      = SNAIVE(value ~ lag("year")),
+    ETS         = ETS(value),
+    ARIMA       = ARIMA(value),
+    ARIMA_log   = ARIMA(log(value))
+  )
+
+fit
+```
+
+```{r model-report}
+fit |> select(ARIMA) |> report()
+fit |> select(ETS) |> report()
+```
+
+*Briefly explain, in your own words, what model each one selected (e.g. which ETS error/trend/season combination, which ARIMA(p,d,q)(P,D,Q) order) and why that's a sensible choice given the EDA above.*
+
+# Validation
+
+## Forecast accuracy on the holdout set
+
+```{r validate-forecast}
+fc <- fit |> forecast(new_data = test)
+
+fc |>
+  autoplot(bind_rows(train, test), level = NULL) +
+  labs(title = "Forecasts vs actuals: Total industry nights sold",
+       y = "Nights sold ('000)")
+```
+
+```{r validate-accuracy}
+fc |>
+  accuracy(nights_sold |> filter(category == "Total industry")) |>
+  arrange(RMSE) |>
+  dplyr::select(.model, RMSE, MAE, MAPE, MASE) |>
+  kable(digits = 2)
+```
+
+*State which model wins on which metric, and whether that's consistent across RMSE/MAE/MAPE/MASE — real data often disagrees across metrics, which is worth commenting on rather than glossing over.*
+
+## Residual diagnostics
+
+```{r validate-residuals}
+fit |>
+  dplyr::select(ARIMA) |>
+  gg_tsresiduals() +
+  labs(title = "Residual diagnostics: ARIMA model")
+```
+
+```{r validate-ljungbox}
+fit |>
+  dplyr::select(ARIMA) |>
+  augment() |>
+  features(.innov, ljung_box, lag = 24, dof = 3)
+```
+
+*Interpret the Ljung-Box test: do residuals look like white noise, or is there remaining structure the model missed (a common finding around the COVID period)? A model "winning" on accuracy but failing residual diagnostics is a legitimate, interesting finding to report — don't hide it.*
+
+# Reflection
+
+*(This section can also be lightly reused/cross-referenced in your main Reflective Commentary (§3 of the portfolio), but should stand on its own here too.)*
+
+**Learning achievements:** *What did building this project teach you about tsibbles, STL decomposition, or ETS/ARIMA that lecture examples alone didn't?*
+
+**Methodological challenges:** *E.g. deciding how to handle the COVID-19 structural break, choosing the train/test split point, reconciling disagreement between accuracy metrics.*
+
+**Ethical and reproducibility considerations:** *Data is public/aggregated (no POPIA issue). Note the code is fully reproducible from the raw StatsSA download; mention any manual steps (e.g. renaming the download) that should be scripted instead.*
+
+**What I would do differently next time:** *E.g. try an intervention/regression-with-ARIMA-errors model for the COVID dummy, compare against a longer/shorter training window, or extend to more accommodation categories.*
+
+# 

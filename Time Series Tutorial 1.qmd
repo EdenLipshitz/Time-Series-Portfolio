@@ -264,23 +264,22 @@ s1 <- subset(df, store_id == "S001")
 
 # plot_time_series
 s1 %>%
-  plot_time_series(date, sales)
+  plot_time_series(date, sales, .interactive = FALSE)
 
 # tk_summary_diagnostics
 s1 %>%
   tk_summary_diagnostics(date)
-
 # plot_seasonal_diagnostics
 s1 %>%
-  plot_seasonal_diagnostics(date, sales)
+  plot_seasonal_diagnostics(date, sales, .interactive = FALSE)
 
 # plot_acf_diagnostics
 s1 %>%
-  plot_acf_diagnostics(date, sales)
+  plot_acf_diagnostics(date, sales, .interactive = FALSE)
 
 # plot_anomaly_diagnostics
-s1 %>%
-  plot_anomaly_diagnostics(date, sales)
+# s1 %>%
+#   plot_anomaly_diagnostics(date, sales)
 ```
 
 ## Question 7 - Answering code questions 
